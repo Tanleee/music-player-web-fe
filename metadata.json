@@ -1,0 +1,6 @@
+{
+  "name": "ESP32-C3 PocketAudio Studio",
+  "description": "Client-side audio converter, 320x240 RGB565 TFT wallpaper studio, and device controller for an ESP32-C3 ST7789 DIY music player.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
