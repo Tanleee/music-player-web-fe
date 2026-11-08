@@ -20,6 +20,9 @@ import { formatDuration } from '../utils/encoders';
 interface DeviceControlPageProps {
   status: ApiStatusResponse;
   isConnected: boolean;
+  isUploading: boolean;
+  uploadProgress: number;
+  uploadingLabel: string;
   actionError: string | null;
   onClearError: () => void;
   onSendCommand: (payload: ApiCmdRequest) => Promise<void>;
@@ -28,6 +31,9 @@ interface DeviceControlPageProps {
 export function DeviceControlPage({
   status,
   isConnected,
+  isUploading,
+  uploadProgress,
+  uploadingLabel,
   actionError,
   onClearError,
   onSendCommand,
@@ -40,6 +46,8 @@ export function DeviceControlPage({
     status.display.brightness
   );
   const [isDraggingBrightness, setIsDraggingBrightness] = useState(false);
+
+  const controlsDisabled = !isConnected || isUploading;
 
   useEffect(() => {
     if (!isDraggingVolume) {
@@ -70,7 +78,7 @@ export function DeviceControlPage({
   const commitVolume = () => {
     if (!isDraggingVolume) return;
     setIsDraggingVolume(false);
-    if (isConnected) {
+    if (!controlsDisabled) {
       void onSendCommand({ cmd: 'volume', value: volumeDraft });
     }
   };
@@ -78,12 +86,17 @@ export function DeviceControlPage({
   const commitBrightness = () => {
     if (!isDraggingBrightness) return;
     setIsDraggingBrightness(false);
-    if (isConnected) {
+    if (!controlsDisabled) {
       void onSendCommand({ cmd: 'brightness', value: brightnessDraft });
     }
   };
 
   const isPlaying = status.player.state === 'playing';
+  const showActiveTransfer = isUploading || status.transfer.active;
+  const activeTransferPercent = isUploading ? uploadProgress : status.transfer.percent;
+  const activeTransferText = isUploading
+    ? uploadingLabel || 'UPLOADING...'
+    : `${status.transfer.type.toUpperCase()}: ${status.transfer.name}`;
 
   return (
     <div className="space-y-6 sm:space-y-8 min-w-0">
@@ -99,7 +112,7 @@ export function DeviceControlPage({
             ) : (
               <>
                 <WifiOff className="h-4 w-4 text-rose-400 shrink-0" aria-hidden="true" />
-                <span className="text-sm font-bold text-rose-400">Disconnected</span>
+                <span className="text-rose-400 font-sans font-bold text-sm">Disconnected</span>
               </>
             )}
           </div>
@@ -118,7 +131,9 @@ export function DeviceControlPage({
         </div>
 
         <span className="text-xs text-slate-400 font-mono">
-          Polling /api/status (1000 ms)
+          {isUploading
+            ? `Upload active (${uploadProgress}%) · Polling paused`
+            : 'Polling /api/status (1000 ms)'}
         </span>
       </section>
 
@@ -188,22 +203,22 @@ export function DeviceControlPage({
           <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
             <button
               type="button"
-              disabled={!isConnected}
+              disabled={controlsDisabled}
               onClick={() => void onSendCommand({ cmd: 'prev' })}
               aria-label="Previous track"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 text-slate-200 hover:border-slate-700 hover:text-white disabled:cursor-not-allowed transition-colors cursor-pointer"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 text-slate-200 hover:border-slate-700 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
             >
               <SkipBack className="h-4 w-4" />
             </button>
 
             <button
               type="button"
-              disabled={!isConnected}
+              disabled={controlsDisabled}
               onClick={() =>
                 void onSendCommand({ cmd: isPlaying ? 'pause' : 'play' })
               }
               aria-label={isPlaying ? 'Pause' : 'Play'}
-              className="min-h-[44px] inline-flex items-center justify-center gap-2 px-6 py-2.5 text-xs font-bold text-slate-950 bg-amber-400 rounded-lg hover:bg-amber-300 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[44px] inline-flex items-center justify-center gap-2 px-6 py-2.5 text-xs font-bold text-slate-950 bg-amber-400 rounded-lg hover:bg-amber-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {isPlaying ? (
                 <>
@@ -220,20 +235,20 @@ export function DeviceControlPage({
 
             <button
               type="button"
-              disabled={!isConnected}
+              disabled={controlsDisabled}
               onClick={() => void onSendCommand({ cmd: 'stop' })}
               aria-label="Stop playback"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 text-slate-200 hover:border-slate-700 hover:text-white disabled:cursor-not-allowed transition-colors cursor-pointer"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 text-slate-200 hover:border-slate-700 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
             >
               <Square className="h-4 w-4" />
             </button>
 
             <button
               type="button"
-              disabled={!isConnected}
+              disabled={controlsDisabled}
               onClick={() => void onSendCommand({ cmd: 'next' })}
               aria-label="Next track"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 text-slate-200 hover:border-slate-700 hover:text-white disabled:cursor-not-allowed transition-colors cursor-pointer"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 text-slate-200 hover:border-slate-700 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
             >
               <SkipForward className="h-4 w-4" />
             </button>
@@ -259,7 +274,7 @@ export function DeviceControlPage({
               min={0}
               max={100}
               step={1}
-              disabled={!isConnected}
+              disabled={controlsDisabled}
               value={volumeDraft}
               onChange={(e) => {
                 setIsDraggingVolume(true);
@@ -269,7 +284,7 @@ export function DeviceControlPage({
               onTouchEnd={commitVolume}
               onPointerUp={commitVolume}
               onKeyUp={commitVolume}
-              className="w-full h-6 accent-amber-400 cursor-pointer disabled:cursor-not-allowed"
+              className="w-full h-6 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             />
           </div>
         </div>
@@ -296,7 +311,7 @@ export function DeviceControlPage({
               min={0}
               max={100}
               step={1}
-              disabled={!isConnected}
+              disabled={controlsDisabled}
               value={brightnessDraft}
               onChange={(e) => {
                 setIsDraggingBrightness(true);
@@ -306,7 +321,7 @@ export function DeviceControlPage({
               onTouchEnd={commitBrightness}
               onPointerUp={commitBrightness}
               onKeyUp={commitBrightness}
-              className="w-full h-6 accent-amber-400 cursor-pointer disabled:cursor-not-allowed"
+              className="w-full h-6 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             />
           </div>
 
@@ -365,18 +380,18 @@ export function DeviceControlPage({
                 <span>File Transfer</span>
               </span>
               <span className="font-mono text-slate-400">
-                {status.transfer.active ? `${status.transfer.percent}%` : 'Idle'}
+                {showActiveTransfer ? `${activeTransferPercent}%` : 'Idle'}
               </span>
             </div>
-            {status.transfer.active ? (
+            {showActiveTransfer ? (
               <div className="space-y-1.5">
                 <p className="text-xs font-mono text-amber-300 truncate">
-                  {status.transfer.type.toUpperCase()}: {status.transfer.name}
+                  {activeTransferText}
                 </p>
                 <div className="h-2 w-full overflow-hidden rounded-full bg-slate-950 border border-slate-800">
                   <div
                     className="h-full bg-amber-400 transition-all duration-150"
-                    style={{ width: `${status.transfer.percent}%` }}
+                    style={{ width: `${activeTransferPercent}%` }}
                   />
                 </div>
               </div>

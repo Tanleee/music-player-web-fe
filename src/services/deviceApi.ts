@@ -7,15 +7,15 @@ import {
 } from '../types/player';
 import { TFT_RGB565_BYTE_LENGTH, sanitizeFatFilename } from '../utils/encoders';
 
-const REQUEST_TIMEOUT_MS = 10000;
+const STATUS_TRACKS_TIMEOUT_MS = 3000;
+const CMD_TIMEOUT_MS = 3000;
 
 /**
- * Default to mock mode in development (or when VITE_MOCK="true"),
- * and real relative HTTP/XHR calls in production builds (unless VITE_MOCK="true").
+ * Mock mode is active ONLY in development when VITE_MOCK !== 'false'.
+ * A production build (npm run build) ALWAYS uses real /api/* calls.
  */
 export const IS_MOCK_MODE: boolean =
-  import.meta.env.VITE_MOCK === 'true' ||
-  (import.meta.env.DEV && import.meta.env.VITE_MOCK !== 'false');
+  import.meta.env.DEV && import.meta.env.VITE_MOCK !== 'false';
 
 export const INITIAL_STATUS_FALLBACK: ApiStatusResponse = {
   player: {
@@ -106,7 +106,7 @@ function advanceMockPlayerClock(): void {
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeoutMs: number = REQUEST_TIMEOUT_MS
+  timeoutMs: number = STATUS_TRACKS_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -117,7 +117,7 @@ async function fetchWithTimeout(
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error(`Request to ${url} timed out after ${timeoutMs / 1000}s`);
+      throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
     }
     throw err instanceof Error ? err : new Error(`Network request failed: ${url}`);
   } finally {
@@ -134,10 +134,15 @@ export async function fetchDeviceStatus(): Promise<ApiStatusResponse> {
     return structuredClone(mockStatus);
   }
 
-  const res = await fetchWithTimeout('/api/status', {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-  });
+  const res = await fetchWithTimeout(
+    '/api/status',
+    {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    },
+    STATUS_TRACKS_TIMEOUT_MS
+  );
 
   if (!res.ok) {
     throw new Error(`GET /api/status failed with HTTP ${res.status}`);
@@ -154,10 +159,15 @@ export async function fetchDeviceTracks(): Promise<ApiTracksResponse> {
     return { tracks: structuredClone(mockTracks) };
   }
 
-  const res = await fetchWithTimeout('/api/tracks', {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-  });
+  const res = await fetchWithTimeout(
+    '/api/tracks',
+    {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    },
+    STATUS_TRACKS_TIMEOUT_MS
+  );
 
   if (!res.ok) {
     throw new Error(`GET /api/tracks failed with HTTP ${res.status}`);
@@ -264,14 +274,18 @@ export async function sendDeviceCommand(
     return { ok: true };
   }
 
-  const res = await fetchWithTimeout('/api/cmd', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
+  const res = await fetchWithTimeout(
+    '/api/cmd',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-  });
+    CMD_TIMEOUT_MS
+  );
 
   let data: ApiActionResponse;
   try {
@@ -286,6 +300,9 @@ export async function sendDeviceCommand(
 
   return data;
 }
+
+export const UPLOAD_NETWORK_ERROR_MESSAGE =
+  'Upload interrupted. Check that the ESP32 is on the same WiFi, then retry.';
 
 /**
  * Helper to upload binary buffer via XMLHttpRequest with live progress reporting
@@ -311,6 +328,11 @@ function uploadBinaryViaXhr(
     };
 
     xhr.onload = () => {
+      if (xhr.status === 0) {
+        reject(new Error(UPLOAD_NETWORK_ERROR_MESSAGE));
+        return;
+      }
+
       let parsed: ApiActionResponse | null = null;
       try {
         parsed = JSON.parse(xhr.responseText) as ApiActionResponse;
@@ -331,11 +353,11 @@ function uploadBinaryViaXhr(
     };
 
     xhr.onerror = () => {
-      reject(new Error('Network error while uploading to ESP32'));
+      reject(new Error(UPLOAD_NETWORK_ERROR_MESSAGE));
     };
 
     xhr.onabort = () => {
-      reject(new Error('Upload aborted'));
+      reject(new Error(UPLOAD_NETWORK_ERROR_MESSAGE));
     };
 
     const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/octet-stream' });

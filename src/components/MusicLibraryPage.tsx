@@ -36,6 +36,7 @@ interface MusicLibraryPageProps {
   isLoadingTracks: boolean;
   tracksError: string | null;
   uploadingTrackId: string | null;
+  isUploadingAny: boolean;
   uploadProgress: number;
   actionError: string | null;
   onClearError: () => void;
@@ -56,6 +57,7 @@ export function MusicLibraryPage({
   isLoadingTracks,
   tracksError,
   uploadingTrackId,
+  isUploadingAny,
   uploadProgress,
   actionError,
   onClearError,
@@ -87,7 +89,8 @@ export function MusicLibraryPage({
   const previewTrack =
     stagedTracks.find((t) => t.id === previewTrackId) ?? stagedTracks[0] ?? null;
 
-  const isAnyTransferActive = status.transfer.active || uploadingTrackId !== null;
+  const isAnyTransferActive = isUploadingAny || status.transfer.active;
+  const displayedProgress = isUploadingAny ? uploadProgress : status.transfer.percent;
   const isBtPlayingWarning =
     status.bt.connected && status.player.state === 'playing';
 
@@ -177,7 +180,7 @@ export function MusicLibraryPage({
   };
 
   const handlePlayClick = async (trackName: string) => {
-    if (!isConnected) return;
+    if (!isConnected || isUploadingAny) return;
     setBusyTrackName(trackName);
     try {
       await onPlayDeviceTrack(trackName);
@@ -187,7 +190,7 @@ export function MusicLibraryPage({
   };
 
   const handleConfirmDelete = async (trackName: string) => {
-    if (!isConnected) return;
+    if (!isConnected || isUploadingAny) return;
     setBusyTrackName(trackName);
     try {
       await onDeleteDeviceTrack(trackName);
@@ -214,7 +217,7 @@ export function MusicLibraryPage({
         </div>
         {isAnyTransferActive && (
           <span className="font-mono text-amber-300 shrink-0">
-            Transfer in progress ({status.transfer.active ? status.transfer.percent : uploadProgress}%)
+            Transfer in progress ({displayedProgress}%)
           </span>
         )}
       </div>
@@ -423,7 +426,7 @@ export function MusicLibraryPage({
             <button
               type="button"
               onClick={onRefreshTracks}
-              disabled={isLoadingTracks}
+              disabled={isLoadingTracks || isUploadingAny}
               className="min-h-[44px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-950 border border-slate-800 rounded-lg hover:border-slate-700 disabled:opacity-50 transition-colors cursor-pointer shrink-0"
             >
               <RefreshCw
@@ -466,7 +469,7 @@ export function MusicLibraryPage({
                   >
                     <button
                       type="button"
-                      disabled={!isConnected || isBusy}
+                      disabled={!isConnected || isBusy || isUploadingAny}
                       onClick={() => handlePlayClick(track.name)}
                       className="min-h-[44px] flex-1 min-w-0 flex items-center gap-3 text-left cursor-pointer disabled:cursor-not-allowed"
                     >
@@ -499,7 +502,7 @@ export function MusicLibraryPage({
                         <>
                           <button
                             type="button"
-                            disabled={!isConnected || isBusy}
+                            disabled={!isConnected || isBusy || isUploadingAny}
                             onClick={() => handleConfirmDelete(track.name)}
                             className="min-h-[44px] sm:min-h-[34px] px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 disabled:opacity-50 cursor-pointer whitespace-nowrap"
                           >
@@ -516,7 +519,7 @@ export function MusicLibraryPage({
                       ) : (
                         <button
                           type="button"
-                          disabled={!isConnected || isBusy}
+                          disabled={!isConnected || isBusy || isUploadingAny}
                           onClick={() => setConfirmDeleteName(track.name)}
                           aria-label={`Delete ${track.name}`}
                           className="min-h-[44px] min-w-[44px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-2 text-slate-400 hover:text-rose-400 disabled:opacity-40 transition-colors cursor-pointer"

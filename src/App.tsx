@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Navbar, ActivePage } from './components/Navbar';
 import { MusicLibraryPage } from './components/MusicLibraryPage';
 import { WallpaperPage } from './components/WallpaperPage';
@@ -20,6 +20,7 @@ import { convertAudioFileToFixedWav } from './services/audioConverter';
 import {
   INITIAL_STATUS_FALLBACK,
   IS_MOCK_MODE,
+  UPLOAD_NETWORK_ERROR_MESSAGE,
   fetchDeviceStatus,
   fetchDeviceTracks,
   sendDeviceCommand,
@@ -30,9 +31,10 @@ import {
 export default function App() {
   const [activePage, setActivePage] = useState<ActivePage>('library');
 
-  // Real device status polled every 1000 ms
+  // Real device status polled sequentially via recursive setTimeout
   const [status, setStatus] = useState<ApiStatusResponse>(INITIAL_STATUS_FALLBACK);
   const [isConnected, setIsConnected] = useState<boolean>(IS_MOCK_MODE);
+  const consecutiveFailuresRef = useRef<number>(0);
 
   // Device SD card tracks from GET /api/tracks
   const [deviceTracks, setDeviceTracks] = useState<DeviceTrackItem[]>([]);
@@ -50,7 +52,10 @@ export default function App() {
 
   // Shared XHR upload progress & error state
   const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadingLabel, setUploadingLabel] = useState<string>('');
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const isUploading = uploadingTrackId !== null || isUploadingWallpaper;
 
   const loadTracks = useCallback(async () => {
     setIsLoadingTracks(true);
@@ -67,32 +72,51 @@ export default function App() {
     }
   }, []);
 
-  // Poll GET /api/status every 1000 ms
+  // Sequential recursive setTimeout status polling loop:
+  // - Pauses completely while any audio or wallpaper upload is running.
+  // - Waits 1000 ms after success, or 2000 ms after failure.
+  // - Only sets isConnected=false after 3 consecutive failures.
+  // - Resumes immediately when an upload finishes.
   useEffect(() => {
-    let active = true;
+    if (isUploading) {
+      return;
+    }
 
-    const poll = async () => {
+    let cancelled = false;
+    let timerId: number | undefined;
+
+    const pollOnce = async () => {
+      if (cancelled) return;
       try {
         const nextStatus = await fetchDeviceStatus();
-        if (!active) return;
+        if (cancelled) return;
+        consecutiveFailuresRef.current = 0;
         setStatus(nextStatus);
         setIsConnected(true);
+        timerId = window.setTimeout(() => {
+          void pollOnce();
+        }, 1000);
       } catch {
-        if (!active) return;
-        setIsConnected(false);
+        if (cancelled) return;
+        consecutiveFailuresRef.current += 1;
+        if (consecutiveFailuresRef.current >= 3) {
+          setIsConnected(false);
+        }
+        timerId = window.setTimeout(() => {
+          void pollOnce();
+        }, 2000);
       }
     };
 
-    void poll();
-    const timer = window.setInterval(() => {
-      void poll();
-    }, 1000);
+    void pollOnce();
 
     return () => {
-      active = false;
-      window.clearInterval(timer);
+      cancelled = true;
+      if (timerId !== undefined) {
+        window.clearTimeout(timerId);
+      }
     };
-  }, []);
+  }, [isUploading]);
 
   // Initial load of GET /api/tracks
   useEffect(() => {
@@ -100,12 +124,29 @@ export default function App() {
   }, [loadTracks]);
 
   const handleSendCommand = async (payload: ApiCmdRequest) => {
+    if (isUploading) return;
     setActionError(null);
     try {
       await sendDeviceCommand(payload);
-      const latest = await fetchDeviceStatus();
-      setStatus(latest);
-      setIsConnected(true);
+      // Apply immediate local feedback while the single sequential poll loop fetches /api/status
+      setStatus((prev) => {
+        const next = structuredClone(prev);
+        if (payload.cmd === 'play') next.player.state = 'playing';
+        else if (payload.cmd === 'pause') next.player.state = 'paused';
+        else if (payload.cmd === 'stop') {
+          next.player.state = 'stopped';
+          next.player.position_s = 0;
+        } else if (payload.cmd === 'volume' && typeof payload.value === 'number') {
+          next.player.volume = payload.value;
+        } else if (payload.cmd === 'brightness' && typeof payload.value === 'number') {
+          next.display.brightness = payload.value;
+        } else if (payload.cmd === 'play_track' && payload.name) {
+          next.player.track = payload.name;
+          next.player.state = 'playing';
+          next.player.position_s = 0;
+        }
+        return next;
+      });
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : `Command "${payload.cmd}" failed`
@@ -118,6 +159,7 @@ export default function App() {
   };
 
   const handleDeleteDeviceTrack = async (trackName: string) => {
+    if (isUploading) return;
     setActionError(null);
     try {
       await sendDeviceCommand({ cmd: 'delete_track', name: trackName });
@@ -226,9 +268,10 @@ export default function App() {
   };
 
   const handleUploadStagedTrack = async (track: StagedAudioTrack) => {
-    if (!track.convertedWavBytes) return;
+    if (!track.convertedWavBytes || isUploading) return;
     setActionError(null);
     setUploadingTrackId(track.id);
+    setUploadingLabel(`AUDIO: ${track.sanitizedWavName}`);
     setUploadProgress(0);
     try {
       await uploadAudioToDevice(
@@ -241,14 +284,15 @@ export default function App() {
           t.id === track.id ? { ...t, uploadedToDevice: true } : t
         )
       );
-      await loadTracks();
     } catch (err) {
       setActionError(
-        err instanceof Error ? err.message : 'Audio upload failed'
+        err instanceof Error ? err.message : UPLOAD_NETWORK_ERROR_MESSAGE
       );
     } finally {
       setUploadingTrackId(null);
+      setUploadingLabel('');
       setUploadProgress(0);
+      await loadTracks();
     }
   };
 
@@ -270,8 +314,11 @@ export default function App() {
     name: string,
     rgb565Bytes: Uint8Array
   ): Promise<string | null> => {
+    if (isUploading) return null;
     setActionError(null);
     setIsUploadingWallpaper(true);
+    const sanitized = sanitizeFatFilename(name, '');
+    setUploadingLabel(`WALLPAPER: ${sanitized}`);
     setUploadProgress(0);
     try {
       const res = await uploadWallpaperToDevice(name, rgb565Bytes, (pct) =>
@@ -280,12 +327,14 @@ export default function App() {
       return res.sanitizedName;
     } catch (err) {
       setActionError(
-        err instanceof Error ? err.message : 'Wallpaper upload failed'
+        err instanceof Error ? err.message : UPLOAD_NETWORK_ERROR_MESSAGE
       );
       return null;
     } finally {
       setIsUploadingWallpaper(false);
+      setUploadingLabel('');
       setUploadProgress(0);
+      await loadTracks();
     }
   };
 
@@ -309,6 +358,7 @@ export default function App() {
             isLoadingTracks={isLoadingTracks}
             tracksError={tracksError}
             uploadingTrackId={uploadingTrackId}
+            isUploadingAny={isUploading}
             uploadProgress={uploadProgress}
             actionError={actionError}
             onClearError={() => {
@@ -332,6 +382,7 @@ export default function App() {
             status={status}
             isConnected={isConnected}
             isUploadingWallpaper={isUploadingWallpaper}
+            isUploadingAny={isUploading}
             uploadProgress={uploadProgress}
             actionError={actionError}
             onClearError={() => setActionError(null)}
@@ -346,6 +397,9 @@ export default function App() {
           <DeviceControlPage
             status={status}
             isConnected={isConnected}
+            isUploading={isUploading}
+            uploadProgress={uploadProgress}
+            uploadingLabel={uploadingLabel}
             actionError={actionError}
             onClearError={() => setActionError(null)}
             onSendCommand={handleSendCommand}

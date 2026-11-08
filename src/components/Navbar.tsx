@@ -1,4 +1,5 @@
 import { Wifi, WifiOff } from 'lucide-react';
+import { IS_MOCK_MODE } from '../services/deviceApi';
 
 export type ActivePage = 'library' | 'wallpaper' | 'control';
 
@@ -26,17 +27,27 @@ export function Navbar({
   return (
     <header className="border-b border-slate-800/80 bg-[#0b0f17]/95 backdrop-blur">
       <div className="mx-auto flex flex-wrap md:flex-nowrap max-w-7xl items-center justify-between gap-y-2 gap-x-3 md:gap-8 px-3 sm:px-6 py-2.5 sm:py-3.5 min-w-0">
-        {/* Zone 1: Brand wordmark */}
-        <a
-          href="#library"
-          onClick={(e) => {
-            e.preventDefault();
-            onNavigate('library');
-          }}
-          className="min-h-[44px] inline-flex items-center text-base sm:text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-amber-400"
-        >
-          PocketAudio ESP32
-        </a>
+        {/* Zone 1: Brand wordmark + dev-only MOCK MODE badge */}
+        <div className="flex items-center gap-2 shrink-0 min-w-0">
+          <a
+            href="#library"
+            onClick={(e) => {
+              e.preventDefault();
+              onNavigate('library');
+            }}
+            className="min-h-[44px] inline-flex items-center text-base sm:text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-amber-400"
+          >
+            PocketAudio ESP32
+          </a>
+          {IS_MOCK_MODE && (
+            <span
+              data-testid="mock-mode-badge"
+              className="inline-flex items-center rounded border border-amber-400/50 bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-mono font-bold tracking-wider text-amber-300 whitespace-nowrap shrink-0"
+            >
+              MOCK MODE
+            </span>
+          )}
+        </div>
 
         {/* Zone 2: Primary navigation links */}
         <nav

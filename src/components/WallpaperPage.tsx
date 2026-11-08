@@ -27,6 +27,7 @@ interface WallpaperPageProps {
   status: ApiStatusResponse;
   isConnected: boolean;
   isUploadingWallpaper: boolean;
+  isUploadingAny: boolean;
   uploadProgress: number;
   actionError: string | null;
   onClearError: () => void;
@@ -69,6 +70,7 @@ export function WallpaperPage({
   status,
   isConnected,
   isUploadingWallpaper,
+  isUploadingAny,
   uploadProgress,
   actionError,
   onClearError,
@@ -109,7 +111,8 @@ export function WallpaperPage({
     panY: 0,
   });
 
-  const isAnyTransferActive = status.transfer.active || isUploadingWallpaper;
+  const isAnyTransferActive = isUploadingAny || status.transfer.active;
+  const displayedProgress = isUploadingAny ? uploadProgress : status.transfer.percent;
   const sanitizedFileName = sanitizeFatFilename(wallpaperName || 'wallpaper', '');
 
   const recomputeTftFrame = () => {
@@ -262,6 +265,7 @@ export function WallpaperPage({
   };
 
   const handleSendToDeviceClick = async () => {
+    if (isAnyTransferActive) return;
     const wp = buildCurrentWallpaperObject();
     onSaveWallpaper(wp);
     const uploadedName = await onSendWallpaperToDevice(wp.name, wp.rgb565Bytes);
@@ -303,7 +307,7 @@ export function WallpaperPage({
         </div>
         {isAnyTransferActive && (
           <span className="font-mono text-amber-300 shrink-0">
-            Transfer active ({status.transfer.active ? status.transfer.percent : uploadProgress}%)
+            Transfer active ({displayedProgress}%)
           </span>
         )}
       </div>
