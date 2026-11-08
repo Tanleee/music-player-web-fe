@@ -1,121 +1,449 @@
 import {
-  AudioTrack,
-  DeviceCommandLog,
-  DeviceStatus,
-  PlaybackState,
-  Playlist,
-  SavedWallpaper,
+  ApiActionResponse,
+  ApiCmdRequest,
+  ApiStatusResponse,
+  ApiTracksResponse,
+  DeviceTrackItem,
 } from '../types/player';
-import { formatBytes } from '../utils/encoders';
+import { TFT_RGB565_BYTE_LENGTH, sanitizeFatFilename } from '../utils/encoders';
+
+const REQUEST_TIMEOUT_MS = 10000;
 
 /**
- * Placeholder Device Communication Layer for ESP32-C3 + ST7789 Music Player.
- *
- * The hardware connection protocol (WebSerial UART, BLE GATT, or WiFi HTTP/WebSocket)
- * is not decided yet. All functions below act as clean, modular stubs that record
- * structured command payloads and return simulated responses so a real transport
- * can be wired in later without changing UI components.
+ * Default to mock mode in development (or when VITE_MOCK="true"),
+ * and real relative HTTP/XHR calls in production builds (unless VITE_MOCK="true").
  */
+export const IS_MOCK_MODE: boolean =
+  import.meta.env.VITE_MOCK === 'true' ||
+  (import.meta.env.DEV && import.meta.env.VITE_MOCK !== 'false');
 
-export const INITIAL_DEVICE_STATUS: DeviceStatus = {
-  connected: false,
-  transportType: 'placeholder-stub',
-  batteryPercent: 86,
-  batteryVoltageMv: 4080,
-  isCharging: false,
-  wifiSsid: 'MakerBench_2.4GHz',
-  wifiRssiDbm: -56,
-  ipAddress: '192.168.1.142',
-  firmwareVersion: 'v0.9.4-esp32c3 (LovyanGFX 1.1.16)',
-  mcuModel: 'ESP32-C3FH4 (RISC-V 160MHz)',
-  displayDriver: 'ST7789 320x240 SPI (RGB565 LE)',
-  sdTotalBytes: 16 * 1024 * 1024 * 1024, // 16 GB SDHC
-  sdUsedBytes: 4.58 * 1024 * 1024 * 1024, // 4.58 GB used
-  sdFreeBytes: 11.42 * 1024 * 1024 * 1024, // 11.42 GB free
-  lastSyncAt: '2026-10-25 08:15',
+export const INITIAL_STATUS_FALLBACK: ApiStatusResponse = {
+  player: {
+    state: 'stopped',
+    track: '',
+    position_s: 0,
+    duration_s: 0,
+    volume: 75,
+  },
+  display: {
+    brightness: 80,
+  },
+  sd: {
+    ok: true,
+    free_mb: 11694,
+    total_mb: 15872,
+  },
+  wifi: {
+    rssi: -58,
+    ip: '192.168.1.142',
+  },
+  bt: {
+    connected: true,
+    device: 'JBL GO 3',
+  },
+  transfer: {
+    active: false,
+    type: '',
+    name: '',
+    percent: 0,
+  },
 };
 
-function makeLogEntry(action: string, payloadSummary: string): DeviceCommandLog {
-  const now = new Date();
-  const timeStr = now.toTimeString().slice(0, 8);
-  return {
-    id: `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    timestamp: timeStr,
-    action,
-    payloadSummary,
-    status: 'queued-placeholder',
-  };
+// In-memory state used only when IS_MOCK_MODE is active
+let mockTracks: DeviceTrackItem[] = [
+  { name: 'Solar_Wind_Drift.wav', size: 15876044 },
+  { name: 'Subroutine_09.wav', size: 12524444 },
+  { name: 'Night_Train_C3.wav', size: 18698444 },
+];
+
+let mockStatus: ApiStatusResponse = {
+  player: {
+    state: 'paused',
+    track: 'Solar_Wind_Drift.wav',
+    position_s: 42,
+    duration_s: 180,
+    volume: 75,
+  },
+  display: {
+    brightness: 85,
+  },
+  sd: {
+    ok: true,
+    free_mb: 11694,
+    total_mb: 15872,
+  },
+  wifi: {
+    rssi: -56,
+    ip: '192.168.1.142',
+  },
+  bt: {
+    connected: true,
+    device: 'JBL GO 3',
+  },
+  transfer: {
+    active: false,
+    type: '',
+    name: '',
+    percent: 0,
+  },
+};
+
+let lastMockTick = Date.now();
+
+function advanceMockPlayerClock(): void {
+  const now = Date.now();
+  const elapsedSec = Math.floor((now - lastMockTick) / 1000);
+  if (elapsedSec >= 1) {
+    lastMockTick = now;
+    if (mockStatus.player.state === 'playing' && mockStatus.player.duration_s > 0) {
+      const nextPos = mockStatus.player.position_s + elapsedSec;
+      mockStatus.player.position_s =
+        nextPos >= mockStatus.player.duration_s ? 0 : nextPos;
+    }
+  }
+}
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(`Request to ${url} timed out after ${timeoutMs / 1000}s`);
+    }
+    throw err instanceof Error ? err : new Error(`Network request failed: ${url}`);
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 /**
- * Placeholder: Send playback transport control command to the ESP32-C3.
+ * GET /api/status
  */
-export async function sendPlaybackCommandToDevice(
-  command: 'play' | 'pause' | 'next' | 'prev' | 'seek' | 'volume' | 'shuffle' | 'repeat' | 'select_track',
-  statePatch: Partial<PlaybackState>
-): Promise<DeviceCommandLog> {
-  // TODO: Wire in WebSerial / WebSocket / HTTP transport once ESP32-C3 protocol is finalized
-  return makeLogEntry(
-    `PLAYBACK_${command.toUpperCase()}`,
-    JSON.stringify(statePatch)
-  );
+export async function fetchDeviceStatus(): Promise<ApiStatusResponse> {
+  if (IS_MOCK_MODE) {
+    advanceMockPlayerClock();
+    return structuredClone(mockStatus);
+  }
+
+  const res = await fetchWithTimeout('/api/status', {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    throw new Error(`GET /api/status failed with HTTP ${res.status}`);
+  }
+
+  return (await res.json()) as ApiStatusResponse;
 }
 
 /**
- * Placeholder: Sync converted 44.1kHz 16-bit Mono WAV tracks & playlists to the ESP32-C3 SD card.
+ * GET /api/tracks
  */
-export async function syncLibraryToDevicePlaceholder(
-  tracks: AudioTrack[],
-  playlists: Playlist[]
-): Promise<{ log: DeviceCommandLog; syncedCount: number; totalBytes: number }> {
-  const readyTracks = tracks.filter((t) => t.status === 'done');
-  const totalBytes = readyTracks.reduce((acc, t) => acc + t.convertedSizeBytes, 0);
-  // TODO: Stream WAV files (44100Hz, 16-bit PCM, mono) to /sd/music/ and write /sd/playlists.json
-  const log = makeLogEntry(
-    'SYNC_LIBRARY_TO_SD',
-    `tracks=${readyTracks.length} (${formatBytes(totalBytes)}), playlists=${playlists.length} -> /sd/music/`
-  );
-  return {
-    log,
-    syncedCount: readyTracks.length,
-    totalBytes,
-  };
+export async function fetchDeviceTracks(): Promise<ApiTracksResponse> {
+  if (IS_MOCK_MODE) {
+    return { tracks: structuredClone(mockTracks) };
+  }
+
+  const res = await fetchWithTimeout('/api/tracks', {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    throw new Error(`GET /api/tracks failed with HTTP ${res.status}`);
+  }
+
+  return (await res.json()) as ApiTracksResponse;
 }
 
 /**
- * Placeholder: Push a 320x240 RGB565 little-endian .bin wallpaper to the ESP32-C3 ST7789 display.
+ * POST /api/cmd
  */
-export async function sendWallpaperToDevicePlaceholder(
-  wallpaper: SavedWallpaper
-): Promise<DeviceCommandLog> {
-  // TODO: Send 153,600 bytes raw RGB565 little-endian frame buffer to ESP32-C3 /sd/wallpapers/
-  return makeLogEntry(
-    'PUSH_WALLPAPER_RGB565',
-    `name="${wallpaper.name}", resolution=320x240, format=RGB565_LE, bytes=${wallpaper.byteLength}`
-  );
+export async function sendDeviceCommand(
+  payload: ApiCmdRequest
+): Promise<ApiActionResponse> {
+  if (IS_MOCK_MODE) {
+    switch (payload.cmd) {
+      case 'play':
+        if (!mockStatus.player.track && mockTracks.length > 0) {
+          mockStatus.player.track = mockTracks[0].name;
+          mockStatus.player.duration_s = Math.max(
+            1,
+            Math.round(mockTracks[0].size / 88200)
+          );
+        }
+        mockStatus.player.state = 'playing';
+        lastMockTick = Date.now();
+        break;
+      case 'pause':
+        mockStatus.player.state = 'paused';
+        break;
+      case 'stop':
+        mockStatus.player.state = 'stopped';
+        mockStatus.player.position_s = 0;
+        break;
+      case 'next': {
+        if (mockTracks.length > 0) {
+          const idx = mockTracks.findIndex((t) => t.name === mockStatus.player.track);
+          const next = mockTracks[(idx + 1) % mockTracks.length];
+          mockStatus.player.track = next.name;
+          mockStatus.player.position_s = 0;
+          mockStatus.player.duration_s = Math.max(1, Math.round(next.size / 88200));
+        }
+        break;
+      }
+      case 'prev': {
+        if (mockTracks.length > 0) {
+          const idx = mockTracks.findIndex((t) => t.name === mockStatus.player.track);
+          const prev =
+            mockTracks[(idx - 1 + mockTracks.length) % mockTracks.length];
+          mockStatus.player.track = prev.name;
+          mockStatus.player.position_s = 0;
+          mockStatus.player.duration_s = Math.max(1, Math.round(prev.size / 88200));
+        }
+        break;
+      }
+      case 'volume':
+        if (typeof payload.value === 'number') {
+          mockStatus.player.volume = Math.max(0, Math.min(100, Math.round(payload.value)));
+        }
+        break;
+      case 'brightness':
+        if (typeof payload.value === 'number') {
+          mockStatus.display.brightness = Math.max(
+            0,
+            Math.min(100, Math.round(payload.value))
+          );
+        }
+        break;
+      case 'play_track': {
+        if (!payload.name) {
+          return { ok: false, error: 'Missing track name' };
+        }
+        const found = mockTracks.find((t) => t.name === payload.name);
+        if (!found) {
+          return { ok: false, error: `Track "${payload.name}" not found on SD card` };
+        }
+        mockStatus.player.track = found.name;
+        mockStatus.player.state = 'playing';
+        mockStatus.player.position_s = 0;
+        mockStatus.player.duration_s = Math.max(1, Math.round(found.size / 88200));
+        lastMockTick = Date.now();
+        break;
+      }
+      case 'delete_track': {
+        if (!payload.name) {
+          return { ok: false, error: 'Missing track name' };
+        }
+        const target = mockTracks.find((t) => t.name === payload.name);
+        mockTracks = mockTracks.filter((t) => t.name !== payload.name);
+        if (target) {
+          mockStatus.sd.free_mb = Math.min(
+            mockStatus.sd.total_mb,
+             +(mockStatus.sd.free_mb + target.size / (1024 * 1024)).toFixed(1)
+          );
+        }
+        if (mockStatus.player.track === payload.name) {
+          mockStatus.player.state = 'stopped';
+          mockStatus.player.track = mockTracks[0]?.name ?? '';
+          mockStatus.player.position_s = 0;
+        }
+        break;
+      }
+    }
+    return { ok: true };
+  }
+
+  const res = await fetchWithTimeout('/api/cmd', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  let data: ApiActionResponse;
+  try {
+    data = (await res.json()) as ApiActionResponse;
+  } catch {
+    throw new Error(`Invalid JSON response from POST /api/cmd (HTTP ${res.status})`);
+  }
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || `Command "${payload.cmd}" failed (HTTP ${res.status})`);
+  }
+
+  return data;
 }
 
 /**
- * Placeholder: Poll device telemetry (battery, WiFi RSSI, SD card free space).
+ * Helper to upload binary buffer via XMLHttpRequest with live progress reporting
+ * and no request timeout.
  */
-export async function pollDeviceTelemetryPlaceholder(
-  current: DeviceStatus
-): Promise<{ status: DeviceStatus; log: DeviceCommandLog }> {
-  // Slight realistic jitter on RSSI and voltage for UI testing
-  const rssiDelta = Math.floor(Math.random() * 5) - 2;
-  const nextRssi = Math.max(-82, Math.min(-42, current.wifiRssiDbm + rssiDelta));
-  const nowStr = new Date().toTimeString().slice(0, 5);
+function uploadBinaryViaXhr(
+  url: string,
+  bytes: Uint8Array,
+  onProgress?: (percent: number) => void
+): Promise<ApiActionResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.timeout = 0; // No timeout for large SD card transfers
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('Accept', 'application/json');
 
-  const nextStatus: DeviceStatus = {
-    ...current,
-    wifiRssiDbm: nextRssi,
-    lastSyncAt: `Today ${nowStr}`,
-  };
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        const pct = Math.min(100, Math.round((event.loaded / event.total) * 100));
+        onProgress?.(pct);
+      }
+    };
 
-  const log = makeLogEntry(
-    'POLL_TELEMETRY',
-    `batt=${nextStatus.batteryPercent}% (${nextStatus.batteryVoltageMv}mV), rssi=${nextStatus.wifiRssiDbm}dBm`
-  );
+    xhr.onload = () => {
+      let parsed: ApiActionResponse | null = null;
+      try {
+        parsed = JSON.parse(xhr.responseText) as ApiActionResponse;
+      } catch {
+        // Fallback if server returns plain text on error
+      }
 
-  return { status: nextStatus, log };
+      if (xhr.status >= 200 && xhr.status < 300 && parsed?.ok !== false) {
+        onProgress?.(100);
+        resolve(parsed ?? { ok: true });
+      } else {
+        reject(
+          new Error(
+            parsed?.error || `Upload failed with HTTP ${xhr.status} (${xhr.statusText || 'Error'})`
+          )
+        );
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new Error('Network error while uploading to ESP32'));
+    };
+
+    xhr.onabort = () => {
+      reject(new Error('Upload aborted'));
+    };
+
+    const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/octet-stream' });
+    xhr.send(blob);
+  });
+}
+
+/**
+ * POST /api/upload/audio?name=<ascii_filename>.wav
+ * Body: raw WAV bytes (44.1 kHz, 16-bit, mono).
+ */
+export async function uploadAudioToDevice(
+  rawFileName: string,
+  wavBytes: Uint8Array,
+  onProgress?: (percent: number) => void
+): Promise<{ sanitizedName: string; response: ApiActionResponse }> {
+  const sanitizedName = sanitizeFatFilename(rawFileName, 'wav');
+
+  if (IS_MOCK_MODE) {
+    if (mockStatus.transfer.active) {
+      throw new Error('Another file transfer is already active on the device.');
+    }
+    mockStatus.transfer = {
+      active: true,
+      type: 'audio',
+      name: sanitizedName,
+      percent: 0,
+    };
+
+    const steps = [15, 35, 60, 85, 100];
+    for (const pct of steps) {
+      await new Promise((r) => setTimeout(r, 120));
+      mockStatus.transfer.percent = pct;
+      onProgress?.(pct);
+    }
+
+    const existingIdx = mockTracks.findIndex((t) => t.name === sanitizedName);
+    if (existingIdx >= 0) {
+      mockTracks[existingIdx] = { name: sanitizedName, size: wavBytes.byteLength };
+    } else {
+      mockTracks = [{ name: sanitizedName, size: wavBytes.byteLength }, ...mockTracks];
+      mockStatus.sd.free_mb = Math.max(
+        0,
+        +(mockStatus.sd.free_mb - wavBytes.byteLength / (1024 * 1024)).toFixed(1)
+      );
+    }
+
+    mockStatus.transfer = {
+      active: false,
+      type: '',
+      name: '',
+      percent: 0,
+    };
+
+    return { sanitizedName, response: { ok: true } };
+  }
+
+  const url = `/api/upload/audio?name=${encodeURIComponent(sanitizedName)}`;
+  const response = await uploadBinaryViaXhr(url, wavBytes, onProgress);
+  return { sanitizedName, response };
+}
+
+/**
+ * POST /api/upload/wallpaper?name=<ascii_filename>
+ * Body: raw 153600 bytes RGB565 little-endian, 240x320.
+ */
+export async function uploadWallpaperToDevice(
+  rawName: string,
+  rgb565Bytes: Uint8Array,
+  onProgress?: (percent: number) => void
+): Promise<{ sanitizedName: string; response: ApiActionResponse }> {
+  if (rgb565Bytes.byteLength !== TFT_RGB565_BYTE_LENGTH) {
+    throw new Error(
+      `Invalid RGB565 buffer length: expected ${TFT_RGB565_BYTE_LENGTH} bytes, got ${rgb565Bytes.byteLength}`
+    );
+  }
+
+  const sanitizedName = sanitizeFatFilename(rawName, '');
+
+  if (IS_MOCK_MODE) {
+    if (mockStatus.transfer.active) {
+      throw new Error('Another file transfer is already active on the device.');
+    }
+    mockStatus.transfer = {
+      active: true,
+      type: 'wallpaper',
+      name: sanitizedName,
+      percent: 0,
+    };
+
+    const steps = [20, 50, 80, 100];
+    for (const pct of steps) {
+      await new Promise((r) => setTimeout(r, 110));
+      mockStatus.transfer.percent = pct;
+      onProgress?.(pct);
+    }
+
+    mockStatus.transfer = {
+      active: false,
+      type: '',
+      name: '',
+      percent: 0,
+    };
+
+    return { sanitizedName, response: { ok: true } };
+  }
+
+  const url = `/api/upload/wallpaper?name=${encodeURIComponent(sanitizedName)}`;
+  const response = await uploadBinaryViaXhr(url, rgb565Bytes, onProgress);
+  return { sanitizedName, response };
 }

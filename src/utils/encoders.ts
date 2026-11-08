@@ -1,16 +1,17 @@
 /**
- * Fixed hardware target constants for the ESP32-C3 music player.
+ * Fixed hardware target constants for the ESP32 music player.
  * Audio: WAV, 44100Hz, 16-bit PCM, mono.
- * Display: 320x240 TFT (ST7789 via LovyanGFX), raw RGB565 little-endian.
+ * Display: 240x320 Portrait TFT (ST7789 via LovyanGFX), raw RGB565 little-endian.
  */
 export const TARGET_AUDIO_SAMPLE_RATE = 44100 as const;
 export const TARGET_AUDIO_BIT_DEPTH = 16 as const;
 export const TARGET_AUDIO_CHANNELS = 1 as const;
 export const TARGET_AUDIO_BYTES_PER_SAMPLE = 2 as const;
-export const TARGET_AUDIO_BYTE_RATE = TARGET_AUDIO_SAMPLE_RATE * TARGET_AUDIO_CHANNELS * TARGET_AUDIO_BYTES_PER_SAMPLE; // 88200 B/s
+export const TARGET_AUDIO_BYTE_RATE =
+  TARGET_AUDIO_SAMPLE_RATE * TARGET_AUDIO_CHANNELS * TARGET_AUDIO_BYTES_PER_SAMPLE; // 88200 B/s
 
-export const TFT_WIDTH = 320 as const;
-export const TFT_HEIGHT = 240 as const;
+export const TFT_WIDTH = 240 as const;
+export const TFT_HEIGHT = 320 as const;
 export const TFT_RGB565_BYTE_LENGTH = TFT_WIDTH * TFT_HEIGHT * 2; // 153,600 bytes
 
 export interface WavHeaderInfo {
@@ -23,6 +24,48 @@ export interface WavHeaderInfo {
   blockAlign: number;
   bitsPerSample: number;
   dataChunkSize: number;
+}
+
+/**
+ * Sanitizes a filename for FAT SD card storage on ESP32:
+ * - Normalizes NFD and strips Vietnamese/Latin diacritics (including đ/Đ -> d/D)
+ * - Replaces spaces and special characters with "_"
+ * - Keeps only ASCII letters, digits, "_", and "-"
+ * - Truncates base name to max 24 characters before the extension
+ */
+export function sanitizeFatFilename(inputName: string, extension?: string): string {
+  const trimmed = inputName.trim();
+  const lastDot = trimmed.lastIndexOf('.');
+  const rawBase = lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed;
+  const rawExt =
+    extension !== undefined
+      ? extension.replace(/^\./, '')
+      : lastDot > 0
+      ? trimmed.slice(lastDot + 1)
+      : '';
+
+  const asciiBase = rawBase
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[_-]+|[_-]+$/g, '');
+
+  const safeBase = (asciiBase || 'file').slice(0, 24).replace(/[_-]+$/g, '') || 'file';
+
+  if (!rawExt) {
+    return safeBase;
+  }
+
+  const safeExt = rawExt
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]+/g, '')
+    .toLowerCase();
+
+  return safeExt ? `${safeBase}.${safeExt}` : safeBase;
 }
 
 /**
@@ -40,7 +83,6 @@ export function downmixAndResampleTo44100Mono(
   const sourceLength = channels[0].length;
   const numChannels = channels.length;
 
-  // Step 1: Downmix to mono at source sample rate
   const monoSource = new Float32Array(sourceLength);
   if (numChannels === 1) {
     monoSource.set(channels[0]);
@@ -58,7 +100,6 @@ export function downmixAndResampleTo44100Mono(
     return monoSource;
   }
 
-  // Step 2: Resample to 44100 Hz using linear interpolation
   const ratio = sourceSampleRate / TARGET_AUDIO_SAMPLE_RATE;
   const targetLength = Math.max(1, Math.round(sourceLength / ratio));
   const resampled = new Float32Array(targetLength);
@@ -84,26 +125,22 @@ export function encodeWavPcm16Mono(monoSamplesAt44100: Float32Array): Uint8Array
   const buffer = new ArrayBuffer(totalByteLength);
   const view = new DataView(buffer);
 
-  // "RIFF" chunk descriptor
   writeAscii(view, 0, 'RIFF');
   view.setUint32(4, 36 + dataByteLength, true);
   writeAscii(view, 8, 'WAVE');
 
-  // "fmt " sub-chunk
   writeAscii(view, 12, 'fmt ');
-  view.setUint32(16, 16, true); // PCM subchunk1Size = 16
-  view.setUint16(20, 1, true); // AudioFormat = 1 (PCM)
-  view.setUint16(22, TARGET_AUDIO_CHANNELS, true); // NumChannels = 1 (Mono)
-  view.setUint32(24, TARGET_AUDIO_SAMPLE_RATE, true); // SampleRate = 44100
-  view.setUint32(28, TARGET_AUDIO_BYTE_RATE, true); // ByteRate = 88200
-  view.setUint16(32, TARGET_AUDIO_CHANNELS * TARGET_AUDIO_BYTES_PER_SAMPLE, true); // BlockAlign = 2
-  view.setUint16(34, TARGET_AUDIO_BIT_DEPTH, true); // BitsPerSample = 16
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, TARGET_AUDIO_CHANNELS, true);
+  view.setUint32(24, TARGET_AUDIO_SAMPLE_RATE, true);
+  view.setUint32(28, TARGET_AUDIO_BYTE_RATE, true);
+  view.setUint16(32, TARGET_AUDIO_CHANNELS * TARGET_AUDIO_BYTES_PER_SAMPLE, true);
+  view.setUint16(34, TARGET_AUDIO_BIT_DEPTH, true);
 
-  // "data" sub-chunk
   writeAscii(view, 36, 'data');
   view.setUint32(40, dataByteLength, true);
 
-  // 16-bit signed little-endian PCM samples
   let offset = 44;
   for (let i = 0; i < monoSamplesAt44100.length; i++) {
     const clamped = Math.max(-1, Math.min(1, monoSamplesAt44100[i]));
@@ -132,7 +169,6 @@ export function parseWavHeader(wavBytes: Uint8Array): WavHeaderInfo {
   const blockAlign = view.getUint16(32, true);
   const bitsPerSample = view.getUint16(34, true);
 
-  // Locate 'data' chunk (ffmpeg may insert a LIST/INFO chunk before 'data')
   let offset = 12;
   let dataChunkSize = 0;
   while (offset + 8 <= wavBytes.byteLength) {
@@ -159,9 +195,8 @@ export function parseWavHeader(wavBytes: Uint8Array): WavHeaderInfo {
 }
 
 /**
- * Encodes an RGBA pixel buffer (320x240) into raw RGB565 little-endian format
+ * Encodes an RGBA pixel buffer (240x320 portrait) into raw RGB565 little-endian format
  * for ST7789 / LovyanGFX (`153,600` bytes).
- * Optional Floyd-Steinberg error diffusion dithering reduces banding on 16-bit TFT panels.
  */
 export function encodeRgb565LittleEndian(
   rgba: Uint8ClampedArray,
@@ -180,7 +215,6 @@ export function encodeRgb565LittleEndian(
   const totalPixels = width * height;
   const output = new Uint8Array(totalPixels * 2);
 
-  // Working copy of RGB channels if dithering is enabled
   const rBuf = new Float32Array(totalPixels);
   const gBuf = new Float32Array(totalPixels);
   const bBuf = new Float32Array(totalPixels);
@@ -204,7 +238,6 @@ export function encodeRgb565LittleEndian(
       const b5 = (oldB >> 3) & 0x1f;
 
       if (dither) {
-        // Reconstruct 8-bit values to calculate quantization error
         const quantR = (r5 << 3) | (r5 >> 2);
         const quantG = (g6 << 2) | (g6 >> 4);
         const quantB = (b5 << 3) | (b5 >> 2);
@@ -213,7 +246,6 @@ export function encodeRgb565LittleEndian(
         const errG = oldG - quantG;
         const errB = oldB - quantB;
 
-        // Distribute error to neighbors (Floyd-Steinberg)
         if (x + 1 < width) {
           rBuf[i + 1] += (errR * 7) / 16;
           gBuf[i + 1] += (errG * 7) / 16;
@@ -238,7 +270,6 @@ export function encodeRgb565LittleEndian(
 
       const rgb565 = (r5 << 11) | (g6 << 5) | b5;
       const outIdx = i * 2;
-      // Little-endian byte order: low byte first, high byte second
       output[outIdx] = rgb565 & 0xff;
       output[outIdx + 1] = (rgb565 >> 8) & 0xff;
     }
@@ -248,8 +279,7 @@ export function encodeRgb565LittleEndian(
 }
 
 /**
- * Decodes raw RGB565 little-endian bytes back into an RGBA pixel buffer
- * so the TFT preview accurately reflects 16-bit color quantization.
+ * Decodes raw RGB565 little-endian bytes (240x320) back into an RGBA pixel buffer.
  */
 export function decodeRgb565LittleEndianToRgba(
   rgb565Bytes: Uint8Array,
@@ -279,29 +309,6 @@ export function decodeRgb565LittleEndianToRgba(
   return rgba;
 }
 
-/**
- * Pure helper for reordering items in a playlist via drag-and-drop or buttons.
- */
-export function reorderItems<T>(items: readonly T[], fromIndex: number, toIndex: number): T[] {
-  if (
-    fromIndex < 0 ||
-    fromIndex >= items.length ||
-    toIndex < 0 ||
-    toIndex >= items.length ||
-    fromIndex === toIndex
-  ) {
-    return [...items];
-  }
-  const result = [...items];
-  const [moved] = result.splice(fromIndex, 1);
-  result.splice(toIndex, 0, moved);
-  return result;
-}
-
-/**
- * Extracts default Artist and Title metadata from an audio filename.
- * Example: "Boards of Canada - Olson.flac" -> { artist: "Boards of Canada", title: "Olson", ext: "FLAC" }
- */
 export function parseFilenameMetadata(fileName: string): {
   title: string;
   artist: string;

@@ -8,110 +8,98 @@ import {
   Loader2,
   Download,
   Edit3,
-  Plus,
   Trash2,
-  ArrowUp,
-  ArrowDown,
-  GripVertical,
-  RotateCcw,
   HardDrive,
   Volume2,
+  RefreshCw,
+  Send,
+  Bluetooth,
 } from 'lucide-react';
-import { AudioTrack, DeviceStatus, Playlist } from '../types/player';
+import {
+  ApiStatusResponse,
+  DeviceTrackItem,
+  StagedAudioTrack,
+} from '../types/player';
 import {
   TARGET_AUDIO_SAMPLE_RATE,
   TARGET_AUDIO_BIT_DEPTH,
   formatBytes,
   formatDuration,
+  sanitizeFatFilename,
 } from '../utils/encoders';
 
 interface MusicLibraryPageProps {
-  tracks: AudioTrack[];
-  playlists: Playlist[];
-  deviceStatus: DeviceStatus;
-  onUploadFiles: (files: File[]) => void;
-  onAddSimulatedBatch: () => void;
-  onRetryTrackConversion: (trackId: string) => void;
-  onUpdateTrackMetadata: (trackId: string, title: string, artist: string) => void;
-  onDeleteTrack: (trackId: string) => void;
-  onCreatePlaylist: (name: string, description: string) => void;
-  onDeletePlaylist: (playlistId: string) => void;
-  onAddTrackToPlaylist: (playlistId: string, trackId: string) => void;
-  onRemoveTrackFromPlaylist: (playlistId: string, trackIndex: number) => void;
-  onReorderPlaylistTracks: (playlistId: string, fromIndex: number, toIndex: number) => void;
-  onSendTrackToNowPlaying: (trackId: string) => void;
+  deviceTracks: DeviceTrackItem[];
+  stagedTracks: StagedAudioTrack[];
+  status: ApiStatusResponse;
+  isConnected: boolean;
+  isLoadingTracks: boolean;
+  tracksError: string | null;
+  uploadingTrackId: string | null;
+  uploadProgress: number;
+  actionError: string | null;
+  onClearError: () => void;
+  onRefreshTracks: () => void;
+  onPlayDeviceTrack: (trackName: string) => Promise<void>;
+  onDeleteDeviceTrack: (trackName: string) => Promise<void>;
+  onSelectLocalFiles: (files: File[]) => void;
+  onUpdateStagedTitle: (id: string, newTitle: string, newArtist: string) => void;
+  onRemoveStagedTrack: (id: string) => void;
+  onUploadStagedTrack: (track: StagedAudioTrack) => Promise<void>;
 }
 
 export function MusicLibraryPage({
-  tracks,
-  playlists,
-  deviceStatus,
-  onUploadFiles,
-  onAddSimulatedBatch,
-  onRetryTrackConversion,
-  onUpdateTrackMetadata,
-  onDeleteTrack,
-  onCreatePlaylist,
-  onDeletePlaylist,
-  onAddTrackToPlaylist,
-  onRemoveTrackFromPlaylist,
-  onReorderPlaylistTracks,
-  onSendTrackToNowPlaying,
+  deviceTracks,
+  stagedTracks,
+  status,
+  isConnected,
+  isLoadingTracks,
+  tracksError,
+  uploadingTrackId,
+  uploadProgress,
+  actionError,
+  onClearError,
+  onRefreshTracks,
+  onPlayDeviceTrack,
+  onDeleteDeviceTrack,
+  onSelectLocalFiles,
+  onUpdateStagedTitle,
+  onRemoveStagedTrack,
+  onUploadStagedTrack,
 }: MusicLibraryPageProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
 
   const [isDraggingOverDropzone, setIsDraggingOverDropzone] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'done' | 'converting' | 'error'>('all');
+  const [confirmDeleteName, setConfirmDeleteName] = useState<string | null>(null);
+  const [busyTrackName, setBusyTrackName] = useState<string | null>(null);
 
-  // Preview audio player state (supports comparing 'original' vs 'converted' 44.1kHz mono WAV)
-  const [previewTrackId, setPreviewTrackId] = useState<string | null>(tracks[0]?.id ?? null);
+  // Local A/B preview state for staged conversions
+  const [previewTrackId, setPreviewTrackId] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState<'converted' | 'original'>('converted');
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
 
-  // Track Metadata Inline Editing state
+  // Staged track inline metadata/filename editing
   const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editArtist, setEditArtist] = useState('');
 
-  // Playlist Management state
-  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string>(
-    playlists[0]?.id ?? ''
-  );
-  const [newPlaylistName, setNewPlaylistName] = useState('');
-  const [newPlaylistDesc, setNewPlaylistDesc] = useState('');
-  const [playlistCreationError, setPlaylistCreationError] = useState('');
-  const [draggedPlaylistIndex, setDraggedPlaylistIndex] = useState<number | null>(null);
-
-  const activePlaylist =
-    playlists.find((p) => p.id === selectedPlaylistId) ?? playlists[0] ?? null;
-
   const previewTrack =
-    tracks.find((t) => t.id === previewTrackId) ?? tracks[0] ?? null;
+    stagedTracks.find((t) => t.id === previewTrackId) ?? stagedTracks[0] ?? null;
 
-  // Storage math: base SD card usage + converted library size
-  const convertedLibraryBytes = tracks
-    .filter((t) => t.status === 'done')
-    .reduce((sum, t) => sum + t.convertedSizeBytes, 0);
-  const totalUsedBytes = deviceStatus.sdUsedBytes + convertedLibraryBytes;
-  const freeBytes = Math.max(0, deviceStatus.sdTotalBytes - totalUsedBytes);
-  const usedPercent = Math.min(100, (totalUsedBytes / deviceStatus.sdTotalBytes) * 100);
+  const isAnyTransferActive = status.transfer.active || uploadingTrackId !== null;
+  const isBtPlayingWarning =
+    status.bt.connected && status.player.state === 'playing';
 
-  const filteredTracks = tracks.filter((track) => {
-    const matchesStatus = statusFilter === 'all' ? true : track.status === statusFilter;
-    const q = searchQuery.trim().toLowerCase();
-    const matchesSearch =
-      !q ||
-      track.title.toLowerCase().includes(q) ||
-      track.artist.toLowerCase().includes(q) ||
-      track.fileName.toLowerCase().includes(q);
-    return matchesStatus && matchesSearch;
-  });
+  const usedMb = Math.max(0, status.sd.total_mb - status.sd.free_mb);
+  const usedPercent =
+    status.sd.total_mb > 0
+      ? Math.min(100, (usedMb / status.sd.total_mb) * 100)
+      : 0;
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      onUploadFiles(Array.from(e.target.files));
+      onSelectLocalFiles(Array.from(e.target.files));
       e.target.value = '';
     }
   };
@@ -120,26 +108,16 @@ export function MusicLibraryPage({
     e.preventDefault();
     setIsDraggingOverDropzone(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      onUploadFiles(Array.from(e.dataTransfer.files));
+      onSelectLocalFiles(Array.from(e.dataTransfer.files));
     }
   };
 
-  const startEditingTrack = (track: AudioTrack) => {
-    setEditingTrackId(track.id);
-    setEditTitle(track.title);
-    setEditArtist(track.artist);
-  };
-
-  const saveTrackMetadata = (trackId: string) => {
-    const cleanTitle = editTitle.trim();
-    const cleanArtist = editArtist.trim();
-    if (!cleanTitle) return;
-    onUpdateTrackMetadata(trackId, cleanTitle, cleanArtist || 'Unknown Artist');
-    setEditingTrackId(null);
-  };
-
-  const handleSelectPreview = (track: AudioTrack, mode: 'original' | 'converted') => {
-    const resolvedMode = mode === 'converted' && !track.convertedWavUrl ? 'original' : mode;
+  const handleSelectPreview = (
+    track: StagedAudioTrack,
+    mode: 'original' | 'converted'
+  ) => {
+    const resolvedMode =
+      mode === 'converted' && !track.convertedWavUrl ? 'original' : mode;
     setPreviewTrackId(track.id);
     setPreviewMode(resolvedMode);
 
@@ -174,55 +152,104 @@ export function MusicLibraryPage({
     }
   };
 
-  const handleDownloadWav = (track: AudioTrack) => {
+  const handleDownloadWav = (track: StagedAudioTrack) => {
     if (!track.convertedWavUrl) return;
     const a = document.createElement('a');
-    const safeName = `${track.artist} - ${track.title}`
-      .replace(/[^a-zA-Z0-9_\-. ]/g, '')
-      .trim()
-      .replace(/\s+/g, '_');
     a.href = track.convertedWavUrl;
-    a.download = `${safeName || 'track'}_44100_16bit_mono.wav`;
+    a.download = track.sanitizedWavName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
   };
 
-  const handleCreatePlaylistSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = newPlaylistName.trim();
-    if (!trimmed) {
-      setPlaylistCreationError('Enter a playlist name.');
-      return;
+  const startEditingTrack = (track: StagedAudioTrack) => {
+    setEditingTrackId(track.id);
+    setEditTitle(track.title);
+    setEditArtist(track.artist);
+  };
+
+  const saveTrackMetadata = (trackId: string) => {
+    const cleanTitle = editTitle.trim();
+    const cleanArtist = editArtist.trim();
+    if (!cleanTitle) return;
+    onUpdateStagedTitle(trackId, cleanTitle, cleanArtist || 'Unknown Artist');
+    setEditingTrackId(null);
+  };
+
+  const handlePlayClick = async (trackName: string) => {
+    if (!isConnected) return;
+    setBusyTrackName(trackName);
+    try {
+      await onPlayDeviceTrack(trackName);
+    } finally {
+      setBusyTrackName(null);
     }
-    setPlaylistCreationError('');
-    onCreatePlaylist(trimmed, newPlaylistDesc.trim() || 'Custom SD card playlist');
-    setNewPlaylistName('');
-    setNewPlaylistDesc('');
+  };
+
+  const handleConfirmDelete = async (trackName: string) => {
+    if (!isConnected) return;
+    setBusyTrackName(trackName);
+    try {
+      await onDeleteDeviceTrack(trackName);
+      setConfirmDeleteName(null);
+    } finally {
+      setBusyTrackName(null);
+    }
   };
 
   return (
     <div className="space-y-6 sm:space-y-8 min-w-0">
-      {/* Top Row: Fixed Hardware Audio Spec + SD Card Storage Telemetry */}
+      {/* Bluetooth Audio Stutter Warning Banner */}
+      <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <Bluetooth className="h-4 w-4 text-amber-400 shrink-0" aria-hidden="true" />
+          <span className="min-w-0">
+            <strong>Note:</strong> Uploading audio or wallpaper files over WiFi during Bluetooth playback may cause temporary audio stutter.
+            {isBtPlayingWarning && (
+              <span className="ml-1 font-semibold text-amber-300">
+                (Bluetooth speaker &quot;{status.bt.device}&quot; is currently playing)
+              </span>
+            )}
+          </span>
+        </div>
+        {isAnyTransferActive && (
+          <span className="font-mono text-amber-300 shrink-0">
+            Transfer in progress ({status.transfer.active ? status.transfer.percent : uploadProgress}%)
+          </span>
+        )}
+      </div>
+
+      {/* Error Alert Banner */}
+      {(actionError || tracksError) && (
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2 min-w-0"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" aria-hidden="true" />
+            <span className="min-w-0 break-words">{actionError || tracksError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onClearError}
+            className="min-h-[44px] sm:min-h-[32px] px-3 text-xs font-semibold text-rose-300 hover:text-white cursor-pointer shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Top Row: Audio Dropzone & Converter + SD Storage & A/B Preview */}
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-stretch min-w-0">
         {/* Left 7 cols: Audio Upload Dropzone + Fixed Hardware Spec */}
         <div className="lg:col-span-7 min-w-0 flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:p-6">
-          <div className="mb-4 flex flex-col sm:flex-row sm:items-baseline justify-between gap-3 border-b border-slate-800/80 pb-4 min-w-0">
-            <div className="min-w-0">
-              <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-100">
-                SD Card Audio Library & Transcoder
-              </h1>
-              <p className="mt-1 text-xs text-slate-400">
-                Hardware Output Lock: WAV · {TARGET_AUDIO_SAMPLE_RATE.toLocaleString()} Hz · {TARGET_AUDIO_BIT_DEPTH}-bit Signed PCM · Mono (88.2 KB/s)
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onAddSimulatedBatch}
-              className="min-h-[44px] sm:min-h-[36px] inline-flex items-center justify-center px-3.5 py-2 text-xs font-medium text-amber-300 border border-amber-400/40 rounded-lg hover:bg-amber-400/10 transition-colors whitespace-nowrap shrink-0 cursor-pointer self-start sm:self-auto"
-            >
-              + Load Demo Audio Batch
-            </button>
+          <div className="mb-4 border-b border-slate-800/80 pb-4 min-w-0">
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-100">
+              Music Library & WAV Transcoder
+            </h1>
+            <p className="mt-1 text-xs text-slate-400">
+              Fixed Output Target: WAV · {TARGET_AUDIO_SAMPLE_RATE.toLocaleString()} Hz · {TARGET_AUDIO_BIT_DEPTH}-bit Signed PCM · Mono (88.2 KB/s)
+            </p>
           </div>
 
           <div
@@ -243,7 +270,7 @@ export function MusicLibraryPage({
               Drag and drop audio files here, or browse from disk
             </p>
             <p className="mt-1 text-xs text-slate-400 max-w-xl">
-              Supported input formats: MP3 · M4A · FLAC · OGG · WAV — automatically normalized to 44,100 Hz 16-bit PCM Mono WAV
+              Supported input formats: MP3 · M4A · FLAC · OGG · WAV — converted in-browser via Web Audio API to 44,100 Hz 16-bit PCM Mono WAV
             </p>
             <div className="mt-4">
               <input
@@ -265,17 +292,19 @@ export function MusicLibraryPage({
           </div>
         </div>
 
-        {/* Right 5 cols: SD Card Storage Meter & Before/After Preview Audition Deck */}
+        {/* Right 5 cols: Real SD Card Storage + Before/After Preview Player */}
         <div className="lg:col-span-5 min-w-0 flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:p-6">
-          {/* SD Storage Capacity */}
-          <div className="min-w-0">
+          {/* SD Storage Capacity from /api/status */}
+          <div className={`min-w-0 ${!isConnected ? 'opacity-50' : ''}`}>
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
               <span className="flex items-center gap-1.5 font-medium text-slate-200 min-w-0">
                 <HardDrive className="h-4 w-4 text-amber-400 shrink-0" aria-hidden="true" />
-                <span>MicroSD Storage (FAT32 · 16 GB)</span>
+                <span>
+                  SD Card ({status.sd.ok ? 'FAT · Ready' : 'Not Ready'})
+                </span>
               </span>
               <span className="font-mono tabular-nums text-slate-300">
-                {formatBytes(totalUsedBytes)} used · {formatBytes(freeBytes)} available
+                {status.sd.free_mb.toLocaleString()} MB free of {status.sd.total_mb.toLocaleString()} MB
               </span>
             </div>
             <div className="mt-2.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-950 border border-slate-800">
@@ -285,8 +314,8 @@ export function MusicLibraryPage({
               />
             </div>
             <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-slate-400 font-mono tabular-nums">
-              <span>Converted WAV Staged: {formatBytes(convertedLibraryBytes)}</span>
-              <span>Est. Remaining Playtime: ~{Math.floor(freeBytes / 88200 / 60)} min</span>
+              <span>Used: {usedMb.toLocaleString()} MB</span>
+              <span>Tracks on SD: {deviceTracks.length}</span>
             </div>
           </div>
 
@@ -336,12 +365,9 @@ export function MusicLibraryPage({
                       {previewTrack.title}
                     </p>
                     <p className="truncate text-xs text-slate-400">
-                      {previewTrack.artist} ·{' '}
                       {previewMode === 'converted'
-                        ? 'WAV · 44100 Hz · 16-bit PCM · Mono'
-                        : `Original ${previewTrack.originalFormat} · ${previewTrack.originalSampleRate} Hz · ${
-                            previewTrack.originalChannels === 2 ? 'Stereo' : 'Mono'
-                          }`}
+                        ? `WAV · 44100 Hz · 16-bit PCM · Mono (${previewTrack.sanitizedWavName})`
+                        : `Original ${previewTrack.originalFormat} · ${previewTrack.originalSampleRate} Hz`}
                     </p>
                   </div>
                   <button
@@ -373,242 +399,131 @@ export function MusicLibraryPage({
               </div>
             ) : (
               <p className="mt-3 text-xs text-slate-500">
-                Select a track below to compare source audio against converted 44.1kHz mono WAV.
+                Select an audio file from disk to convert and audition before/after 44.1 kHz Mono WAV output.
               </p>
             )}
           </div>
         </div>
       </section>
 
-      {/* Main Content Split: Track Conversion Table (7 cols) + Playlist Builder & Reorder (5 cols) */}
+      {/* Main Content Split: Device SD Card Tracks (/api/tracks) + Staged Local Conversions */}
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start min-w-0">
-        {/* Track Table */}
+        {/* Left 7 cols: Device SD Card Track List (GET /api/tracks) */}
         <div className="lg:col-span-7 min-w-0 rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:p-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800 min-w-0">
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800 min-w-0">
             <div className="min-w-0">
               <h2 className="text-base font-semibold text-slate-100">
-                Audio Files ({filteredTracks.length})
+                Device SD Card Tracks ({deviceTracks.length})
               </h2>
               <p className="text-xs text-slate-400">
-                Edit track metadata, compare before/after audio, or add converted WAVs to a playlist
+                Click a track to play on the ESP32 or delete it from the SD card
               </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5 w-full sm:w-auto min-w-0">
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Filter by title or artist..."
-                aria-label="Filter tracks by title or artist"
-                className="min-h-[44px] sm:min-h-[36px] w-full sm:w-48 rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:border-amber-400 focus:outline-none min-w-0"
+            <button
+              type="button"
+              onClick={onRefreshTracks}
+              disabled={isLoadingTracks}
+              className="min-h-[44px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-950 border border-slate-800 rounded-lg hover:border-slate-700 disabled:opacity-50 transition-colors cursor-pointer shrink-0"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 text-amber-400 shrink-0 ${
+                  isLoadingTracks ? 'animate-spin' : ''
+                }`}
               />
-              {/* Interactive segmented filter */}
-              <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-950 p-1 border border-slate-800 w-full sm:w-auto min-w-0">
-                {(['all', 'done', 'converting', 'error'] as const).map((st) => (
-                  <button
-                    key={st}
-                    type="button"
-                    onClick={() => setStatusFilter(st)}
-                    className={`flex-1 sm:flex-initial min-h-[44px] sm:min-h-[32px] px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      statusFilter === st
-                        ? 'bg-slate-800 text-slate-100'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {st === 'all'
-                      ? 'All'
-                      : st === 'done'
-                      ? 'Done'
-                      : st === 'converting'
-                      ? 'Converting'
-                      : 'Errors'}
-                  </button>
-                ))}
-              </div>
-            </div>
+              <span>Refresh List</span>
+            </button>
           </div>
 
-          {filteredTracks.length === 0 ? (
-            <div className="py-12 text-center">
-              <p className="text-sm text-slate-400">No audio tracks match the current filter.</p>
+          {deviceTracks.length === 0 ? (
+            <div className="py-10 text-center">
+              <p className="text-sm text-slate-400">
+                {isLoadingTracks
+                  ? 'Loading tracks from /api/tracks...'
+                  : 'No WAV tracks found on the device SD card.'}
+              </p>
             </div>
           ) : (
-            <div className="mt-4 divide-y divide-slate-800/80">
-              {filteredTracks.map((track) => {
-                const isEditing = editingTrackId === track.id;
-                const isAuditioning = previewTrack?.id === track.id;
+            <div
+              className={`mt-3 divide-y divide-slate-800/80 ${
+                !isConnected ? 'opacity-50' : ''
+              }`}
+            >
+              {deviceTracks.map((track) => {
+                const isPlayingThis =
+                  status.player.track === track.name &&
+                  status.player.state === 'playing';
+                const isCurrentTrack = status.player.track === track.name;
+                const isConfirmingDelete = confirmDeleteName === track.name;
+                const isBusy = busyTrackName === track.name;
 
                 return (
                   <div
-                    key={track.id}
-                    className={`py-4 transition-colors min-w-0 ${
-                      isAuditioning ? 'bg-slate-800/25 px-2.5 rounded-lg' : ''
+                    key={track.name}
+                    className={`py-3.5 px-2 rounded-lg transition-colors flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 min-w-0 ${
+                      isCurrentTrack ? 'bg-amber-400/10' : 'hover:bg-slate-800/40'
                     }`}
                   >
-                    <div className="space-y-3 min-w-0">
-                      {/* Title / Artist / Inline Edit */}
-                      <div className="min-w-0">
-                        {isEditing ? (
-                          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 min-w-0">
-                            <label className="sr-only" htmlFor={`edit-title-${track.id}`}>
-                              Track Title
-                            </label>
-                            <input
-                              id={`edit-title-${track.id}`}
-                              type="text"
-                              value={editTitle}
-                              onChange={(e) => setEditTitle(e.target.value)}
-                              placeholder="Track title"
-                              className="min-h-[44px] sm:min-h-[36px] flex-1 min-w-0 rounded border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-100 focus:border-amber-400 focus:outline-none"
-                            />
-                            <label className="sr-only" htmlFor={`edit-artist-${track.id}`}>
-                              Track Artist
-                            </label>
-                            <input
-                              id={`edit-artist-${track.id}`}
-                              type="text"
-                              value={editArtist}
-                              onChange={(e) => setEditArtist(e.target.value)}
-                              placeholder="Artist name"
-                              className="min-h-[44px] sm:min-h-[36px] flex-1 min-w-0 rounded border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-100 focus:border-amber-400 focus:outline-none"
-                            />
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => saveTrackMetadata(track.id)}
-                                className="min-h-[44px] sm:min-h-[36px] px-3 py-1.5 text-xs font-semibold bg-amber-400 text-slate-950 rounded hover:bg-amber-300 whitespace-nowrap shrink-0 cursor-pointer"
-                              >
-                                Save Metadata
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setEditingTrackId(null)}
-                                className="min-h-[44px] sm:min-h-[36px] px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
-                            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0 flex-1">
-                              <p className="text-sm font-semibold text-slate-100 truncate max-w-full">
-                                {track.title}
-                              </p>
-                              <span className="text-slate-600" aria-hidden="true">
-                                —
-                              </span>
-                              <p className="text-xs font-medium text-slate-300 truncate max-w-full">
-                                {track.artist}
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => startEditingTrack(track)}
-                              aria-label={`Edit metadata for ${track.title}`}
-                              className="min-h-[44px] sm:min-h-[32px] px-2.5 py-1 inline-flex items-center gap-1 text-xs text-slate-300 bg-slate-950/80 border border-slate-800 rounded hover:text-amber-300 hover:border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                            >
-                              <Edit3 className="h-3.5 w-3.5" />
-                              <span>Edit</span>
-                            </button>
-                          </div>
-                        )}
-
-                        {/* Unboxed metadata row with typographic separators */}
-                        <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-slate-400 font-mono tabular-nums min-w-0">
-                          <span>Source: {track.originalFormat} ({formatBytes(track.originalSizeBytes)})</span>
-                          <span aria-hidden="true">·</span>
-                          <span>Duration: {formatDuration(track.durationSec)}</span>
-                          <span aria-hidden="true">·</span>
-                          {track.status === 'done' && (
-                            <span className="text-emerald-400 inline-flex items-center gap-1 font-sans font-medium min-w-0">
-                              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                              <span>Done · WAV 44.1kHz 16-bit Mono ({formatBytes(track.convertedSizeBytes)})</span>
-                            </span>
-                          )}
-                          {track.status === 'converting' && (
-                            <span className="text-amber-300 inline-flex items-center gap-1 font-sans font-medium min-w-0">
-                              <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" aria-hidden="true" />
-                              <span>Converting to 44.1kHz Mono WAV ({track.progress}%)</span>
-                            </span>
-                          )}
-                          {track.status === 'error' && (
-                            <span className="text-rose-400 inline-flex items-center gap-1 font-sans font-medium min-w-0">
-                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                              <span>Error: {track.errorMessage || 'Decode failed'}</span>
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Track Action Controls */}
-                      <div className="flex flex-wrap items-center gap-2 min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => handleSelectPreview(track, 'original')}
-                          className="min-h-[44px] sm:min-h-[34px] px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-950 border border-slate-800 rounded-lg hover:border-slate-700 hover:text-slate-100 whitespace-nowrap shrink-0 cursor-pointer"
+                    <button
+                      type="button"
+                      disabled={!isConnected || isBusy}
+                      onClick={() => handlePlayClick(track.name)}
+                      className="min-h-[44px] flex-1 min-w-0 flex items-center gap-3 text-left cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      <span
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
+                          isPlayingThis
+                            ? 'border-amber-400 bg-amber-400 text-slate-950'
+                            : 'border-slate-700 bg-slate-950 text-slate-200'
+                        }`}
+                      >
+                        <Play className="h-4 w-4" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className={`text-sm font-semibold truncate ${
+                            isCurrentTrack ? 'text-amber-300' : 'text-slate-100'
+                          }`}
                         >
-                          Preview Original
-                        </button>
+                          {track.name}
+                        </p>
+                        <p className="text-xs text-slate-400 font-mono tabular-nums">
+                          {formatBytes(track.size)} · Est.{' '}
+                          {formatDuration(Math.max(1, Math.round(track.size / 88200)))}
+                        </p>
+                      </div>
+                    </button>
 
-                        {track.status === 'done' && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => handleSelectPreview(track, 'converted')}
-                              className="min-h-[44px] sm:min-h-[34px] px-3 py-1.5 text-xs font-medium text-amber-300 bg-slate-950 border border-amber-400/30 rounded-lg hover:bg-amber-400/10 whitespace-nowrap shrink-0 cursor-pointer"
-                            >
-                              Preview WAV
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDownloadWav(track)}
-                              aria-label={`Download converted WAV for ${track.title}`}
-                              className="min-h-[44px] min-w-[44px] sm:min-h-[34px] sm:min-w-[34px] inline-flex items-center justify-center p-2 text-slate-300 bg-slate-950 border border-slate-800 rounded-lg hover:text-slate-100 hover:border-slate-700 cursor-pointer shrink-0"
-                              title="Download 44100Hz 16-bit Mono WAV"
-                            >
-                              <Download className="h-4 w-4" />
-                            </button>
-                            {activePlaylist && (
-                              <button
-                                type="button"
-                                onClick={() => onAddTrackToPlaylist(activePlaylist.id, track.id)}
-                                className="min-h-[44px] sm:min-h-[34px] px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 rounded-lg hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
-                              >
-                                + Playlist
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => onSendTrackToNowPlaying(track.id)}
-                              className="min-h-[44px] sm:min-h-[34px] px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-950 border border-slate-800 rounded-lg hover:text-amber-300 whitespace-nowrap shrink-0 cursor-pointer"
-                            >
-                              Load in Player
-                            </button>
-                          </>
-                        )}
-
-                        {track.status === 'error' && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isConfirmingDelete ? (
+                        <>
                           <button
                             type="button"
-                            onClick={() => onRetryTrackConversion(track.id)}
-                            className="min-h-[44px] sm:min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-300 bg-amber-400/10 border border-amber-400/30 rounded-lg hover:bg-amber-400/20 whitespace-nowrap shrink-0 cursor-pointer"
+                            disabled={!isConnected || isBusy}
+                            onClick={() => handleConfirmDelete(track.name)}
+                            className="min-h-[44px] sm:min-h-[34px] px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 disabled:opacity-50 cursor-pointer whitespace-nowrap"
                           >
-                            <RotateCcw className="h-3.5 w-3.5" />
-                            Retry Conversion
+                            Confirm Delete
                           </button>
-                        )}
-
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteName(null)}
+                            className="min-h-[44px] sm:min-h-[34px] px-2.5 py-1.5 text-xs text-slate-400 hover:text-slate-200 cursor-pointer whitespace-nowrap"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
                         <button
                           type="button"
-                          onClick={() => onDeleteTrack(track.id)}
-                          aria-label={`Remove ${track.title}`}
-                          className="min-h-[44px] min-w-[44px] sm:min-h-[34px] sm:min-w-[34px] inline-flex items-center justify-center p-2 text-slate-500 hover:text-rose-400 transition-colors cursor-pointer shrink-0 ml-auto sm:ml-0"
+                          disabled={!isConnected || isBusy}
+                          onClick={() => setConfirmDeleteName(track.name)}
+                          aria-label={`Delete ${track.name}`}
+                          className="min-h-[44px] min-w-[44px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-2 text-slate-400 hover:text-rose-400 disabled:opacity-40 transition-colors cursor-pointer"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
-                      </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -617,182 +532,170 @@ export function MusicLibraryPage({
           )}
         </div>
 
-        {/* Playlist Creator & Drag-and-Drop Reorder Panel */}
+        {/* Right 5 cols: Local Conversion & Upload Queue */}
         <div className="lg:col-span-5 min-w-0 rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:p-6">
           <div className="pb-4 border-b border-slate-800 min-w-0">
             <h2 className="text-base font-semibold text-slate-100">
-              SD Card Playlists & Track Order
+              Conversion & Upload Queue ({stagedTracks.length})
             </h2>
             <p className="text-xs text-slate-400">
-              Create playlists and drag rows (or use Move Up / Down) to set playback sequence on the ESP32-C3
+              Files are sanitized to FAT ASCII (max 24 chars) and uploaded via XMLHttpRequest
             </p>
           </div>
 
-          {/* Create Playlist Form */}
-          <form onSubmit={handleCreatePlaylistSubmit} className="mt-4 space-y-2.5 min-w-0">
-            <div className="flex flex-col sm:flex-row gap-2 min-w-0">
-              <div className="flex-1 min-w-0">
-                <label htmlFor="new-playlist-name" className="sr-only">
-                  New Playlist Name
-                </label>
-                <input
-                  id="new-playlist-name"
-                  type="text"
-                  value={newPlaylistName}
-                  onChange={(e) => {
-                    setNewPlaylistName(e.target.value);
-                    if (playlistCreationError) setPlaylistCreationError('');
-                  }}
-                  placeholder="New playlist name (e.g. Late Night Synth)..."
-                  className="min-h-[44px] sm:min-h-[38px] w-full min-w-0 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                className="min-h-[44px] sm:min-h-[38px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-950 bg-amber-400 rounded-lg hover:bg-amber-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Create Playlist
-              </button>
+          {stagedTracks.length === 0 ? (
+            <div className="py-10 text-center">
+              <p className="text-xs text-slate-400">
+                No local audio files queued. Drop or select files above to convert them to 44.1 kHz 16-bit Mono WAV and upload to the ESP32.
+              </p>
             </div>
-            {playlistCreationError && (
-              <p className="text-xs text-rose-400">{playlistCreationError}</p>
-            )}
-          </form>
+          ) : (
+            <div className="mt-4 divide-y divide-slate-800/80">
+              {stagedTracks.map((track) => {
+                const isEditing = editingTrackId === track.id;
+                const isUploadingThis = uploadingTrackId === track.id;
 
-          {/* Playlist Selector Tabs */}
-          <div className="mt-4 flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3 min-w-0">
-            {playlists.map((pl) => {
-              const isSelected = activePlaylist?.id === pl.id;
-              return (
-                <button
-                  key={pl.id}
-                  type="button"
-                  onClick={() => setSelectedPlaylistId(pl.id)}
-                  className={`min-h-[44px] sm:min-h-[36px] px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    isSelected
-                      ? 'bg-amber-400 text-slate-950 font-semibold'
-                      : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
-                  }`}
-                >
-                  {pl.name} ({pl.trackIds.length})
-                </button>
-              );
-            })}
-          </div>
+                return (
+                  <div key={track.id} className="py-4 space-y-3 min-w-0">
+                    {isEditing ? (
+                      <div className="space-y-2 min-w-0">
+                        <input
+                          type="text"
+                          value={editTitle}
+                          onChange={(e) => setEditTitle(e.target.value)}
+                          placeholder="Track title (used for FAT filename)"
+                          aria-label="Track title"
+                          className="min-h-[44px] sm:min-h-[36px] w-full rounded border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-100 focus:border-amber-400 focus:outline-none"
+                        />
+                        <p className="text-[11px] font-mono text-slate-400">
+                          FAT Name Preview: {sanitizeFatFilename(editTitle || 'track', 'wav')}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => saveTrackMetadata(track.id)}
+                            className="min-h-[44px] sm:min-h-[34px] px-3 py-1 text-xs font-semibold bg-amber-400 text-slate-950 rounded hover:bg-amber-300 cursor-pointer"
+                          >
+                            Save Name
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingTrackId(null)}
+                            className="min-h-[44px] sm:min-h-[34px] px-2.5 py-1 text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start justify-between gap-2 min-w-0">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-slate-100 truncate">
+                            {track.title}
+                          </p>
+                          <p className="text-xs font-mono text-amber-300/90 truncate">
+                            SD Name: {track.sanitizedWavName}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => startEditingTrack(track)}
+                          aria-label={`Rename ${track.title}`}
+                          className="min-h-[44px] sm:min-h-[32px] px-2.5 py-1 inline-flex items-center gap-1 text-xs text-slate-300 bg-slate-950 border border-slate-800 rounded hover:text-amber-300 cursor-pointer shrink-0"
+                        >
+                          <Edit3 className="h-3.5 w-3.5" />
+                          <span>Rename</span>
+                        </button>
+                      </div>
+                    )}
 
-          {/* Active Playlist Track Sequence */}
-          {activePlaylist ? (
-            <div className="mt-4 min-w-0">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 mb-3 min-w-0">
-                <span className="min-w-0">
-                  Active Playlist: <strong className="text-slate-200">{activePlaylist.name}</strong> ·{' '}
-                  {activePlaylist.trackIds.length} tracks
-                </span>
-                {playlists.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const fallback = playlists.find((p) => p.id !== activePlaylist.id);
-                      onDeletePlaylist(activePlaylist.id);
-                      if (fallback) setSelectedPlaylistId(fallback.id);
-                    }}
-                    className="min-h-[44px] sm:min-h-[32px] px-2 inline-flex items-center text-xs text-slate-400 hover:text-rose-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    Delete Playlist
-                  </button>
-                )}
-              </div>
+                    {/* Conversion status */}
+                    <div className="text-xs font-mono text-slate-400 flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span>{track.originalFormat}</span>
+                      <span aria-hidden="true">·</span>
+                      {track.status === 'converting' && (
+                        <span className="text-amber-300 inline-flex items-center gap-1 font-sans">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                          Converting ({track.progress}%)
+                        </span>
+                      )}
+                      {track.status === 'done' && (
+                        <span className="text-emerald-400 inline-flex items-center gap-1 font-sans">
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                          WAV Ready ({formatBytes(track.convertedSizeBytes)})
+                        </span>
+                      )}
+                      {track.status === 'error' && (
+                        <span className="text-rose-400 inline-flex items-center gap-1 font-sans">
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                          {track.errorMessage || 'Conversion error'}
+                        </span>
+                      )}
+                    </div>
 
-              {activePlaylist.trackIds.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center">
-                  <p className="text-xs text-slate-400">
-                    This playlist is empty. Click <strong>+ Playlist</strong> on any converted track to add it here.
-                  </p>
-                </div>
-              ) : (
-                <ul className="space-y-2 min-w-0" aria-label={`Tracks in ${activePlaylist.name}`}>
-                  {activePlaylist.trackIds.map((tId, idx) => {
-                    const trackObj = tracks.find((t) => t.id === tId);
-                    if (!trackObj) return null;
-
-                    return (
-                      <li
-                        key={`${tId}-${idx}`}
-                        draggable
-                        onDragStart={() => setDraggedPlaylistIndex(idx)}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={() => {
-                          if (draggedPlaylistIndex !== null && draggedPlaylistIndex !== idx) {
-                            onReorderPlaylistTracks(
-                              activePlaylist.id,
-                              draggedPlaylistIndex,
-                              idx
-                            );
-                          }
-                          setDraggedPlaylistIndex(null);
-                        }}
-                        className={`flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/80 px-3 py-2.5 text-xs transition-colors min-w-0 ${
-                          draggedPlaylistIndex === idx ? 'opacity-50 border-amber-400' : ''
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                          <GripVertical
-                            className="h-4 w-4 text-slate-500 shrink-0 cursor-grab"
-                            aria-hidden="true"
+                    {/* XHR Upload Progress Bar */}
+                    {isUploadingThis && (
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-xs font-mono text-amber-300">
+                          <span>Uploading {track.sanitizedWavName}...</span>
+                          <span>{uploadProgress}%</span>
+                        </div>
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-slate-950 border border-slate-800">
+                          <div
+                            className="h-full bg-amber-400 transition-all duration-150"
+                            style={{ width: `${uploadProgress}%` }}
                           />
-                          <span className="font-mono tabular-nums text-slate-500 w-5 shrink-0">
-                            {String(idx + 1).padStart(2, '0')}.
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <p className="font-semibold text-slate-200 truncate">
-                              {trackObj.title}
-                            </p>
-                            <p className="text-slate-400 truncate">
-                              {trackObj.artist} · {formatDuration(trackObj.durationSec)}
-                            </p>
-                          </div>
                         </div>
+                      </div>
+                    )}
 
-                        <div className="flex items-center gap-1 shrink-0">
+                    {/* Action buttons */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {track.status === 'done' && (
+                        <>
                           <button
                             type="button"
-                            disabled={idx === 0}
-                            onClick={() =>
-                              onReorderPlaylistTracks(activePlaylist.id, idx, idx - 1)
-                            }
-                            aria-label={`Move ${trackObj.title} up`}
-                            className="min-h-[44px] min-w-[44px] sm:min-h-[32px] sm:min-w-[32px] inline-flex items-center justify-center p-1.5 text-slate-400 hover:text-slate-100 disabled:opacity-30 cursor-pointer"
+                            disabled={!isConnected || isAnyTransferActive}
+                            onClick={() => onUploadStagedTrack(track)}
+                            className="min-h-[44px] sm:min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-amber-400 rounded-lg hover:bg-amber-300 disabled:opacity-40 cursor-pointer whitespace-nowrap"
                           >
-                            <ArrowUp className="h-4 w-4" />
+                            <Send className="h-3.5 w-3.5" />
+                            <span>
+                              {track.uploadedToDevice ? 'Re-upload to SD' : 'Upload to SD'}
+                            </span>
                           </button>
                           <button
                             type="button"
-                            disabled={idx === activePlaylist.trackIds.length - 1}
-                            onClick={() =>
-                              onReorderPlaylistTracks(activePlaylist.id, idx, idx + 1)
-                            }
-                            aria-label={`Move ${trackObj.title} down`}
-                            className="min-h-[44px] min-w-[44px] sm:min-h-[32px] sm:min-w-[32px] inline-flex items-center justify-center p-1.5 text-slate-400 hover:text-slate-100 disabled:opacity-30 cursor-pointer"
+                            onClick={() => handleSelectPreview(track, 'converted')}
+                            className="min-h-[44px] sm:min-h-[34px] px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-950 border border-slate-800 rounded-lg hover:border-slate-700 cursor-pointer whitespace-nowrap"
                           >
-                            <ArrowDown className="h-4 w-4" />
+                            Preview WAV
                           </button>
                           <button
                             type="button"
-                            onClick={() => onRemoveTrackFromPlaylist(activePlaylist.id, idx)}
-                            aria-label={`Remove ${trackObj.title} from playlist`}
-                            className="min-h-[44px] min-w-[44px] sm:min-h-[32px] sm:min-w-[32px] inline-flex items-center justify-center p-1.5 text-slate-500 hover:text-rose-400 cursor-pointer"
+                            onClick={() => handleDownloadWav(track)}
+                            aria-label={`Download ${track.sanitizedWavName}`}
+                            className="min-h-[44px] min-w-[44px] sm:min-h-[34px] sm:min-w-[34px] inline-flex items-center justify-center p-2 text-slate-300 bg-slate-950 border border-slate-800 rounded-lg hover:text-white cursor-pointer"
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Download className="h-4 w-4" />
                           </button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
+                        </>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => onRemoveStagedTrack(track.id)}
+                        aria-label={`Remove ${track.title} from queue`}
+                        className="min-h-[44px] min-w-[44px] sm:min-h-[34px] sm:min-w-[34px] inline-flex items-center justify-center p-2 text-slate-500 hover:text-rose-400 cursor-pointer ml-auto"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          ) : null}
+          )}
         </div>
       </section>
     </div>
